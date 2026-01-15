@@ -1,5 +1,6 @@
 using UnityEngine;
 using System.Collections;
+using TMPro;
 
 [RequireComponent(typeof(Rigidbody))]
 public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
@@ -12,7 +13,13 @@ public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
     public bool freezeRotationDuringMove = true;
     public bool restrictToHorizontal = true;
 
-    public bool movementEnabled = true; // Åöí«â¡ÅFäOïîÇ©ÇÁà⁄ìÆON/OFFÇ≈Ç´ÇÈ
+    public bool movementEnabled = true; // ??????????ON/OFF???
+
+    public bool startWithCountdown = true;
+    public int countdownFrom = 3;
+    public float countdownInterval = 1.0f;
+    public TMP_Text countdownText;
+    public bool logCountdown = false;
 
     public float stopDuration = 0.5f;
     public float moveDuration = 1.0f;
@@ -41,6 +48,7 @@ public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
     Coroutine stopMoveCoroutine;
     Coroutine knockbackCoroutine;
     Coroutine blinkCoroutine;
+    readonly System.Collections.Generic.HashSet<Collider> ignoredSpikeColliders = new System.Collections.Generic.HashSet<Collider>();
 
     float fixedY;
     Vector2 axisOffset;
@@ -49,6 +57,7 @@ public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
     float debugLogTimer;
 
     bool isKnockbacking;
+    bool isCountingDown;
     RigidbodyConstraints originalConstraints;
     RigidbodyConstraints movementConstraints;
     bool originalCapsuleTrigger;
@@ -103,6 +112,13 @@ public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
 
     void Start()
     {
+        if (startWithCountdown)
+        {
+            movementEnabled = false;
+            StartCoroutine(StartupRoutine());
+            return;
+        }
+
         if (!useAxisCalibration)
         {
             axisCalibrated = true;
@@ -125,6 +141,11 @@ public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
 
     void Update()
     {
+        if (isCountingDown)
+        {
+            moveInput = Vector2.zero;
+            return;
+        }
         if (!axisCalibrated)
         {
             moveInput = Vector2.zero;
@@ -223,6 +244,7 @@ public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
             {
                 if (col == null) continue;
                 Physics.IgnoreCollision(capsuleCollider, col, true);
+                ignoredSpikeColliders.Add(col);
             }
         }
 
@@ -302,10 +324,125 @@ public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
         axisCalibrated = true;
     }
 
+    IEnumerator StartupRoutine()
+    {
+        if (!useAxisCalibration)
+        {
+            axisCalibrated = true;
+        }
+        else
+        {
+            string hName = string.IsNullOrEmpty(horizontalAxisName) ? "Horizontal" : horizontalAxisName;
+            string vName = string.IsNullOrEmpty(verticalAxisName) ? "Vertical" : verticalAxisName;
+            float startX = GetAxisSafe(hName);
+            float startZ = GetAxisSafe(vName);
+            if (Mathf.Abs(startX) > deadZone || Mathf.Abs(startZ) > deadZone)
+            {
+                axisOffset = Vector2.zero;
+                axisCalibrated = true;
+            }
+            else
+            {
+                yield return StartCoroutine(CalibrateAxisRoutine());
+            }
+        }
+
+        isCountingDown = true;
+        yield return StartCoroutine(CountdownRoutine());
+        isCountingDown = false;
+        movementEnabled = true;
+    }
+
+    public void BeginCountdown()
+    {
+        StopAllCoroutines();
+        stopMoveCoroutine = null;
+        knockbackCoroutine = null;
+        blinkCoroutine = null;
+        isKnockbacking = false;
+        movementEnabled = false;
+        StartCoroutine(StartupRoutine());
+    }
+
+    public void TeleportTo(Vector3 position, Quaternion rotation)
+    {
+        if (rb != null)
+        {
+            bool wasKinematic = rb.isKinematic;
+            if (!wasKinematic)
+            {
+                rb.velocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+            }
+            rb.isKinematic = true;
+            rb.position = position;
+            rb.rotation = rotation;
+            transform.position = position;
+            transform.rotation = rotation;
+            rb.isKinematic = wasKinematic;
+            if (!wasKinematic)
+            {
+                rb.Sleep();
+            }
+        }
+        else
+        {
+            transform.position = position;
+            transform.rotation = rotation;
+        }
+
+        fixedY = position.y;
+        moveInput = Vector2.zero;
+        Physics.SyncTransforms();
+    }
+
+    IEnumerator CountdownRoutine()
+    {
+        int start = Mathf.Max(1, countdownFrom);
+        if (countdownText != null) countdownText.gameObject.SetActive(true);
+        for (int i = start; i >= 1; i--)
+        {
+            if (countdownText != null) countdownText.text = i.ToString();
+            if (logCountdown) Debug.Log(string.Format("[Countdown] {0}", i), this);
+            yield return new WaitForSecondsRealtime(countdownInterval);
+        }
+        if (countdownText != null) countdownText.text = string.Empty;
+    }
+
     void StartKnockback()
     {
         if (knockbackCoroutine != null) return;
         knockbackCoroutine = StartCoroutine(KnockbackRoutine());
+    }
+
+    public void ResetForCondition()
+    {
+        if (stopMoveCoroutine != null)
+        {
+            StopCoroutine(stopMoveCoroutine);
+            stopMoveCoroutine = null;
+        }
+        if (knockbackCoroutine != null)
+        {
+            StopCoroutine(knockbackCoroutine);
+            knockbackCoroutine = null;
+        }
+        StopBlink();
+        isKnockbacking = false;
+        moveInput = Vector2.zero;
+        movementEnabled = false;
+
+        if (capsuleCollider != null)
+        {
+            capsuleCollider.isTrigger = originalCapsuleTrigger;
+        }
+        RestoreSpikeCollisions();
+        if (rb != null)
+        {
+            rb.constraints = movementConstraints;
+            rb.velocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
+        }
     }
 
     IEnumerator KnockbackRoutine()
@@ -359,12 +496,25 @@ public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
         {
             capsuleCollider.isTrigger = originalCapsuleTrigger;
         }
+        RestoreSpikeCollisions();
 
         rb.constraints = movementConstraints;
         movementEnabled = true;
         isKnockbacking = false;
         StopBlink();
         knockbackCoroutine = null;
+    }
+
+    void RestoreSpikeCollisions()
+    {
+        if (capsuleCollider == null) return;
+        if (ignoredSpikeColliders.Count == 0) return;
+        foreach (var col in ignoredSpikeColliders)
+        {
+            if (col == null) continue;
+            Physics.IgnoreCollision(capsuleCollider, col, false);
+        }
+        ignoredSpikeColliders.Clear();
     }
 
     void StartBlink()
@@ -400,5 +550,3 @@ public class CapsuleMoveXZ_Rigidbody : MonoBehaviour
         blinkCoroutine = null;
     }
 }
-
-
